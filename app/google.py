@@ -118,6 +118,49 @@ def _error_reason(result: dict) -> str:
     err = result.get("error") or {}
     return err.get("reason") or err.get("status") or "UNKNOWN_ERROR"
 
+
+PLACES_URL = "https://places.googleapis.com/v1/places:searchText"
+PLACES_FIELD_MASK = "places.displayName,places.formattedAddress,places.location"
+
+
+@lru_cache(maxsize=256)
+def _place_cached(api_key: str, referer: str, text: str) -> dict:
+    response = requests.post(
+        PLACES_URL,
+        headers={
+            "Content-Type": "application/json",
+            "X-Goog-Api-Key": api_key,
+            "X-Goog-FieldMask": PLACES_FIELD_MASK,
+            "Referer": referer,
+        },
+        json={"textQuery": text},
+        timeout=REQUEST_TIMEOUT_S,
+    )
+    try:
+        body = response.json()
+    except ValueError:
+        return {"error": f"HTTP {response.status_code}"}
+    places = body.get("places")
+    if not places:
+        return {"error": body.get("error", {}).get("message") or "place not found"}
+    place = places[0]
+    loc = place.get("location", {})
+    return {
+        "name": (place.get("displayName") or {}).get("text"),
+        "address": place.get("formattedAddress"),
+        "lat": loc.get("latitude"),
+        "lon": loc.get("longitude"),
+    }
+
+
+def place_for(api_key: str, referer: str, text: str) -> dict:
+    """
+    free text (address, landmark, name) -> {"lat", "lon", "name", "address"}
+    or {"error": reason}
+    """
+    return _place_cached(api_key, referer, text)
+
+
 def legs_for(api_key: str, referer: str, origin: str, destination: str,
              at_ms: int | None = None) -> dict:
     at_minute = None

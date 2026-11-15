@@ -60,6 +60,7 @@ class GtfsFeed:
     stops: dict[str, Stop] = field(default_factory=dict)
     trips: dict[str, Trip] = field(default_factory=dict)
     departures_by_stop: dict[str, list[tuple[int, str]]] = field(default_factory=dict)
+    stop_times_by_trip: dict[str, list[tuple[int, str]]] = field(default_factory=dict)
     days_cache: dict[str, frozenset[str]] = field(default_factory=dict)
 
 # --- row loaders
@@ -122,6 +123,7 @@ def _load_trips(path: Path, feed: GtfsFeed) -> None:
 
 def _index_stop_times(path: Path, feed: GtfsFeed) -> None:
     pending: dict[str, list[tuple[int, str]]] = {}
+    by_trip: dict[str, list[tuple[int, str]]] = {}
     with path.open(newline="", encoding="utf-8-sig") as f:
         reader = csv.reader(f)
         header = next(reader)
@@ -134,13 +136,21 @@ def _index_stop_times(path: Path, feed: GtfsFeed) -> None:
             trip_id = row[i_trip]
             if not stop_id or not dep or not trip_id:
                 continue
+            sec = hms_to_sec(dep)
             bucket = pending.get(stop_id)
             if bucket is None:
                 bucket = pending[stop_id] = []
-            bucket.append((hms_to_sec(dep), trip_id))
+            bucket.append((sec, trip_id))
+            bucket_t = by_trip.get(trip_id)
+            if bucket_t is None:
+                bucket_t = by_trip[trip_id] = []
+            bucket_t.append((sec, stop_id))
     for stop_id, bucket in pending.items():
         bucket.sort()
         feed.departures_by_stop[stop_id] = bucket
+    for trip_id, bucket in by_trip.items():
+        bucket.sort()  # stop_sequence order ~= time order; sorting is the guarantee
+        feed.stop_times_by_trip[trip_id] = bucket
 
 
 # --- public constructors
