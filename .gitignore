@@ -1,0 +1,7 @@
+.env
+data/
+node_modules/
+.venv/
+.zed/
+app/__pycache__/
+app/gtfs/__pycache__/
