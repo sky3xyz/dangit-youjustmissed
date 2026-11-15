@@ -1,0 +1,38 @@
+name: deploy
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rsync code
+        uses: burnett01/rsync-deployments@7.0.1
+        with:
+          switches: -avz --delete --exclude 'data/' --exclude '.env' --exclude '.venv/'
+          path: |
+            app/
+            server.py
+            pyproject.toml
+            uv.lock
+          remote_path: /home/deployer/app/
+          remote_host: ${{ secrets.VM_HOST }}
+          remote_user: deployer
+          remote_key: ${{ secrets.VM_SSH_KEY }}
+
+      - name: Sync deps + restart + verify
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VM_HOST }}
+          username: deployer
+          key: ${{ secrets.VM_SSH_KEY }}
+          script: |
+            cd ~/app
+            uv sync
+            sudo systemctl restart missed-trips
+            sleep 10
+            systemctl is-active missed-trips
+            curl -sf localhost:8080/healthz
