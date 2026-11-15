@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+
+<head>
+  <title>
+    Just Missed
+  </title>
+
+  <script>
+
+    function load(){
+      const start_in = document.getElementById("start");
+      const end_in = document.getElementById("end");
+
+      const dep_list = document.getElementById("departures");
+
+      //const url = new URL("http://35.208.22.100/api/trip");
+      const url = new URL("http://localhost:8080/api/trip");
+      const params = {
+        start : start_in.value,
+        end : end_in.value
+      };
+
+      url.search = new URLSearchParams(params).toString();
+
+      const eventSource = new EventSource(url.toString());
+
+      eventSource.onmessage = function(event) {
+        if(! "notification" in event.data.data){
+          for(dep of event.data.data){
+            const new_child = document.createElement("li");
+            new_child.textContent = `!!Missed departure`;
+            dep_list.appendChild(new_child);
+          }
+        }else{
+          window.alert(event.data.data.notification);
+        }
+      };
+
+      eventSource.onopen = function(event) {
+          console.log("SSE connection established.");
+      };
+
+      eventSource.onerror = function(err) {
+          console.error("SSE error or connection closed:", err);
+          eventSource.close();
+      };
+    }
+
+  </script>
+
+  <link rel="stylesheet" href="./styles.css"></link>
+</head>
+
+<body>
+  <input id="start" type="text"></input>
+  <input id="end" type="text"></input>
+  <button onclick="load()">Go!</button>
+
+  <ul id="departures"></ul>
+
+</body>

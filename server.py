@@ -47,7 +47,7 @@ def stream_trip():
             delay = next_departure_at(feed, first_stop, build_at(datetime.now(), datetime.now().astimezone())) - time.time()
 
             #Wait until they've missed it
-            time.sleep(delay)
+            time.sleep(delay/1000)
 
             #Update them
             yield wrap({"notification" : "You just missed another departure"})
