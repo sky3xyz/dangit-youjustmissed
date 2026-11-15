@@ -1,7 +1,6 @@
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-
 def parse_csv_line(line: str) -> list[str]:
     fields: list[str] = []
     field: list[str] = []
