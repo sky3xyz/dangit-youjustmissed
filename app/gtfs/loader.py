@@ -1,23 +1,41 @@
+"""
+loading gtfs staically. (one-time)
+"""
+
 import csv
 import threading
+import zipfile
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
 from pathlib import Path
 
+import requests
+
 from .csv_utils import hms_to_sec
+
+WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+
+GTFS_EXPORT_URL = "https://oct-gtfs-emasagcnfmcgeham.z01.azurefd.net/public-access/GTFSExport.zip"
+REQUIRED_FILES = (
+    "routes.txt", "calendar.txt", "calendar_dates.txt",
+    "stops.txt", "trips.txt", "stop_times.txt",
+)
+DOWNLOAD_TIMEOUT_S = (10, 300)
+
+
+# --- dataclasses
 
 @dataclass(slots=True)
 class Route:
     short: str
     long: str
     route_type: int
-    color: str #routes color based on oc's gtfs spec
+    color: str
 
 @dataclass(slots=True)
 class CalendarRow:
     service_id: str
     days: frozenset[str]
-    start: str
+    start: str  # "YYYYMMDD"
     end: str
 
 @dataclass(slots=True)
@@ -34,17 +52,17 @@ class Trip:
     headsign: str
     route_id: str
 
-@dataclass(frozen=True)
+@dataclass
 class GtfsFeed:
     routes: dict[str, Route] = field(default_factory=dict)
     calendar: list[CalendarRow] = field(default_factory=list)
-    exceptions: dict[str, list[tuple[str,int]]] = field(default_factory=dict)
+    exceptions: dict[str, list[tuple[str, int]]] = field(default_factory=dict)
     stops: dict[str, Stop] = field(default_factory=dict)
     trips: dict[str, Trip] = field(default_factory=dict)
     departures_by_stop: dict[str, list[tuple[int, str]]] = field(default_factory=dict)
-    days_cache: dict[str, set[str]] = field(default_factory=dict)
+    days_cache: dict[str, frozenset[str]] = field(default_factory=dict)
 
-# --- loading ---
+# --- row loaders
 def _iter_rows(path: Path):
     with path.open(newline="", encoding="utf-8-sig") as f:
         reader = csv.reader(f)
@@ -62,11 +80,12 @@ def _load_routes(path: Path, feed: GtfsFeed) -> None:
             color=r["route_color"],
         )
 
+
 def _load_calendar(path: Path, feed: GtfsFeed) -> None:
     for c in _iter_rows(path):
         feed.calendar.append(CalendarRow(
             service_id=c["service_id"],
-            days=frozenset(d for d in WEEKDAYS if c[d] == "1"),
+            days=frozenset(d for d in WEEKDAYS if c.get(d) == "1"),
             start=c["start_date"],
             end=c["end_date"],
         ))
@@ -81,6 +100,8 @@ def _load_calendar_dates(path: Path, feed: GtfsFeed) -> None:
 
 def _load_stops(path: Path, feed: GtfsFeed) -> None:
     for s in _iter_rows(path):
+        if s.get("location_type") not in ("", "0"):
+            continue
         feed.stops[s["stop_id"]] = Stop(
             stop_id=s["stop_id"],
             stop_code=s["stop_code"],
@@ -98,10 +119,8 @@ def _load_trips(path: Path, feed: GtfsFeed) -> None:
             route_id=t["route_id"],
         )
 
+
 def _index_stop_times(path: Path, feed: GtfsFeed) -> None:
-    """
-    expensive function that loads all info as typles
-    """
     pending: dict[str, list[tuple[int, str]]] = {}
     with path.open(newline="", encoding="utf-8-sig") as f:
         reader = csv.reader(f)
@@ -123,28 +142,56 @@ def _index_stop_times(path: Path, feed: GtfsFeed) -> None:
         bucket.sort()
         feed.departures_by_stop[stop_id] = bucket
 
-# --- ctor ---
+
+# --- public constructors
+def ensure_feed_files(data_dir: Path) -> None:
+    """
+    download and extract gtfs files from gtfs static.
+
+    delete old files to redownload
+    """
+    data_dir.mkdir(parents=True, exist_ok=True)
+    if all((data_dir / f).is_file() for f in REQUIRED_FILES):
+        return
+
+    print(f"downloading GTFS export -> {data_dir}")
+    response = requests.get(GTFS_EXPORT_URL, timeout=DOWNLOAD_TIMEOUT_S)
+    response.raise_for_status()
+
+    zip_path = data_dir / "GTFSExport.zip"
+    zip_path.write_bytes(response.content)
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            bad = zf.testzip()
+            if bad:
+                raise RuntimeError(f"corrupt entry in GTFS export: {bad}")
+            zf.extractall(data_dir)
+    finally:
+        zip_path.unlink(missing_ok=True)
+
+    missing = [f for f in REQUIRED_FILES if not (data_dir / f).is_file()]
+    if missing:
+        raise RuntimeError(f"GTFS export is missing expected files: {missing}")
+
+
 def build_feed(data_dir: Path) -> GtfsFeed:
+    ensure_feed_files(data_dir)
     feed = GtfsFeed()
-    p = lambda name: data_dir / name
-    _load_routes(p("routes.txt"), feed)
-    _load_calendar(p("calendar.txt"), feed)
-    _load_calendar_dates(p("calendar_dates.txt"), feed)
-    _load_stops(p("stops.txt"), feed)
-    _load_trips(p("trips.txt"), feed)
-    _index_stop_times(p("stop_times.txt"), feed)
+    _load_routes(data_dir / "routes.txt", feed)
+    _load_calendar(data_dir / "calendar.txt", feed)
+    _load_calendar_dates(data_dir / "calendar_dates.txt", feed)
+    _load_stops(data_dir / "stops.txt", feed)
+    _load_trips(data_dir / "trips.txt", feed)
+    _index_stop_times(data_dir / "stop_times.txt", feed)
     return feed
 
-def build_feed_async(data_dir: Path, on_done=None, on_error=None) -> threading.Thread:
+def build_feed_async(data_dir: Path, on_done, on_error) -> threading.Thread:
     def run():
         try:
-            feed = build_feed(data_dir)
-            if on_done:
-                on_done(feed)
+            on_done(build_feed(data_dir))
         except Exception as e:
-            if on_error:
-                on_error(e)
+            on_error(e)
 
-    t = threading.Thread(target=run, name="gtfs-load", daemon=True)
+    t = threading.Thread(target=run, name="gtfs-loader", daemon=True)
     t.start()
     return t

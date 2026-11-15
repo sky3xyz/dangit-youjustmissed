@@ -64,6 +64,19 @@ def shift_ymd(ymd: str, days: int) -> str:
     return shifted.strftime("%Y%m%d")
 
 
-def epoch_ms_for(ymd: str, secs: int) -> int:
-    base_ms = int(datetime.strptime(ymd, "%Y%m%d").replace(tzinfo=ZoneInfo("UTC")).timestamp() * 1000)
+def ymd_to_dash_date(ymd: str) -> str:
+    """
+    Internal "20261115" -> display "15-11-2026".
+    """
+    return f"{ymd[6:8]}-{ymd[4:6]}-{ymd[0:4]}"
+
+
+def epoch_ms_for(ymd: str, secs: int, tz: ZoneInfo) -> int:
+    """
+    ms since epoch of a time moment on a service date.
+
+    Midnight is taken in `tz` (the feed's city),
+    carries seconds >= 86400 (GTFS 24:xx+ times) into the next calendar day. DST-gap/ambiguous times resolve per fold=0.
+    """
+    base_ms = int(datetime.strptime(ymd, "%Y%m%d").replace(tzinfo=tz).timestamp() * 1000)
     return base_ms + secs * 1000
