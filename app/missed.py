@@ -110,6 +110,6 @@ def next_departure_at(feed, stop_id: str, at: dict) -> int | None:
             if epoch_ms > at["epoch_ms"]:
                 return epoch_ms
             # same service date but already departed in real time (a 26:xx
-            # stop_time counted on today's schedule) — keep walking
+            # stop_time counted on today's schedule) - keep walking
         ymd = shift_ymd(ymd, 1)
     return None

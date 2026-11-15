@@ -5,3 +5,5 @@ node_modules/
 .zed/
 app/__pycache__/
 app/gtfs/__pycache__/
+deploy_ed25519
+deploy_ed25519.pub
