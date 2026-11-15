@@ -77,3 +77,60 @@ ul#departures li {
   margin-bottom: 6px;
   letter-spacing: 1px;
 }
+
+/* Same LED board treatment for the next-trip routes list */
+ul#routes {
+  background-color: #000000;
+  color: #ffff00; /* amber LED */
+  font-family: "Courier New", monospace;
+  list-style-type: square;
+  padding: 12px 12px 12px 30px;
+  min-height: 40px;
+  border-top: 2px solid #404040;
+  border-left: 2px solid #404040;
+  border-right: 2px solid #ffffff;
+  border-bottom: 2px solid #ffffff;
+  margin: 0 0 14px 0;
+}
+
+ul#routes li {
+  margin-bottom: 6px;
+  letter-spacing: 1px;
+}
+
+/* Chunky board headers */
+.board-title {
+  font-weight: bold;
+  font-size: 13px;
+  margin: 8px 0 4px 0;
+}
+
+h1 {
+  font-size: 16px;
+  margin-top: 0;
+}
+
+/* Status line under the button */
+#status {
+  font-size: 12px;
+  font-style: italic;
+  min-height: 16px;
+  margin: 0 0 6px 0;
+}
+
+#status.error {
+  color: #a00000;
+  font-weight: bold;
+  font-style: normal;
+}
+
+/* Snap rows: dimmer, informational */
+#departures li.snap {
+  color: #00aa00;
+}
+
+label {
+  font-size: 12px;
+  font-weight: bold;
+}
+

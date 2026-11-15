@@ -12,12 +12,8 @@ jobs:
       - name: Rsync code
         uses: burnett01/rsync-deployments@7.0.1
         with:
-          switches: -avz --delete --exclude 'data/' --exclude '.env' --exclude '.venv/'
-          path: |
-            app/
-            server.py
-            pyproject.toml
-            uv.lock
+          switches: -avz --delete --exclude '.git/' --exclude '.github/' --exclude 'data/' --exclude '.env' --exclude '.venv/' --exclude 'node_modules/' --exclude '__pycache__/' --exclude 'tests/' --exclude '.zed/'
+          path: .
           remote_path: /home/deployer/app/
           remote_host: ${{ secrets.VM_HOST }}
           remote_user: deployer
@@ -33,6 +29,9 @@ jobs:
             cd ~/app
             uv sync
             sudo systemctl restart missed-trips
-            sleep 10
+            for i in $(seq 1 30); do
+              curl -sf localhost:8080/healthz | grep -q '"ok"' && break
+              sleep 5
+            done
             systemctl is-active missed-trips
             curl -sf localhost:8080/healthz

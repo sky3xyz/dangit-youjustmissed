@@ -6,56 +6,154 @@
   </title>
 
   <script>
+    let source = null;
 
     function load(){
       const start_in = document.getElementById("start");
       const end_in = document.getElementById("end");
-
+      const status = document.getElementById("status");
       const dep_list = document.getElementById("departures");
+      const route_list = document.getElementById("routes");
 
-      //const url = new URL("http://35.208.22.100/api/trip");
-      const url = new URL("http://localhost:8080/api/trip");
+      if (source) { source.close(); }
+      dep_list.innerHTML = "";
+      route_list.innerHTML = "";
+      status.textContent = "connecting...";
+
+      const url = new URL("/api/trip", window.location.origin);
       const params = {
-        start : start_in.value,
-        end : end_in.value
+        from : start_in.value,
+        to   : end_in.value
       };
-
       url.search = new URLSearchParams(params).toString();
 
-      const eventSource = new EventSource(url.toString());
+      source = new EventSource(url.toString());
 
-      eventSource.onmessage = function(event) {
-        if(! "notification" in event.data.data){
-          for(dep of event.data.data){
-            const new_child = document.createElement("li");
-            new_child.textContent = `!!Missed departure`;
-            dep_list.appendChild(new_child);
-          }
-        }else{
-          window.alert(event.data.data.notification);
+      source.addEventListener("open", () => {
+        status.textContent = "listening — we'll shout when you miss one";
+      });
+
+      source.addEventListener("error", (e) => {
+        let data = null;
+        try { data = JSON.parse(e.data); } catch (err) { /* connection-level */ }
+        if (data && (data.error || data.unresolved)) {
+          status.textContent = "error: " + (data.error || data.unresolved);
+          status.className = "error";
+        } else {
+          status.textContent = "connection lost";
         }
-      };
+      });
 
-      eventSource.onopen = function(event) {
-          console.log("SSE connection established.");
-      };
+      source.addEventListener("legs", (e) => {
+        const legs = JSON.parse(e.data);
+        route_list.innerHTML = "";
+        const header = document.createElement("li");
+        header.textContent = "--- next trip legs (google) ---";
+        route_list.appendChild(header);
+        if (legs.length === 0) {
+          const li = document.createElement("li");
+          li.textContent = "(no transit legs found)";
+          route_list.appendChild(li);
+        }
+        for (const leg of legs) {
+          const li = document.createElement("li");
+          if (leg.mode === "TRANSIT") {
+            li.textContent = `[${leg.line || "?"}] ${leg.from} -> ${leg.to}` +
+              ` (dep ${fmt(leg.departure_time)} arr ${fmt(leg.arrival_time)})`;
+          } else {
+            li.textContent = `[WALK] ${leg.distance_m || "?"}m — ${leg.instruction || ""}`;
+          }
+          route_list.appendChild(li);
+        }
+      });
 
-      eventSource.onerror = function(err) {
-          console.error("SSE error or connection closed:", err);
-          eventSource.close();
-      };
+      source.addEventListener("missed", (e) => {
+        const data = JSON.parse(e.data);
+        status.textContent = "listening — we'll shout when you miss one";
+        status.className = "";
+
+        const board = data.snapped || {};
+        if (board.from) {
+          const li = document.createElement("li");
+          li.className = "snap";
+          li.textContent = `[snap] "${board.from.query}" -> ${board.from.snapped_to.name}` +
+            ` ${board.from.distance_m}m away`;
+          dep_list.appendChild(li);
+        }
+        if (board.to) {
+          const li = document.createElement("li");
+          li.className = "snap";
+          li.textContent = `[snap] "${board.to.query}" -> ${board.to.snapped_to.name}` +
+            ` ${board.to.distance_m}m away`;
+          dep_list.appendChild(li);
+        }
+
+        const journeys = data.missed_journeys || [];
+        if (journeys.length === 0) {
+          const li = document.createElement("li");
+          li.textContent = "you've missed nothing yet (or it's unreachable). congrats?";
+          dep_list.appendChild(li);
+        }
+        for (const j of journeys) {
+          const li = document.createElement("li");
+          li.textContent = `[${j.route}] ${j.departure} -> ${j.arrival}` +
+            ` | missed by ${j.missed_by_minutes}min` +
+            ` | ${j.legs.length} leg${j.legs.length > 1 ? "s" : ""} | ${j.excuse}`;
+          dep_list.appendChild(li);
+        }
+
+        const flashed = (data.missed_journeys || []).find(j => j.missed_by_minutes <= 3);
+        if (flashed) {
+          window.alert(`you just missed the [${flashed.route}] at ${flashed.departure}!`);
+        }
+      });
     }
 
+    function fmt(iso) {
+      if (!iso) return "?";
+      return iso.slice(11, 19);
+    }
+
+    function autocomplete(input) {
+      clearTimeout(input._timer);
+      input._timer = setTimeout(async () => {
+        const q = input.value;
+        const list = document.getElementById("stop-names");
+        if (!q || q.length < 2) return;
+        try {
+          const res = await fetch("/stops?q=" + encodeURIComponent(q));
+          const body = await res.json();
+          list.innerHTML = "";
+          for (const s of body.results || []) {
+            const opt = document.createElement("option");
+            opt.value = s.name;
+            opt.label = s.code || s.stop_id;
+            list.appendChild(opt);
+          }
+        } catch (err) { /* autocomplete is best-effort */ }
+      }, 250);
+    }
   </script>
 
-  <link rel="stylesheet" href="./styles.css"></link>
+  <link rel="stylesheet" href="/styles.css"></link>
 </head>
 
 <body>
-  <input id="start" type="text"></input>
-  <input id="end" type="text"></input>
+  <h1>dangit, you just missed it</h1>
+
+  <label for="start">from</label>
+  <input id="start" type="text" list="stop-names" placeholder="home, Hurdman, 455 Laurier...">
+  <label for="end">to</label>
+  <input id="end" type="text" list="stop-names" placeholder="work, Bayshore, ...">
+  <datalist id="stop-names"></datalist>
   <button onclick="load()">Go!</button>
 
+  <p id="status">type two places, then Go!</p>
+
+  <div class="board-title">routes to catch (next trip)</div>
+  <ul id="routes"></ul>
+
+  <div class="board-title">last 3 you just missed</div>
   <ul id="departures"></ul>
 
 </body>

@@ -15,7 +15,10 @@ import math
 import threading
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from zoneinfo import ZoneInfo
+
+from flask import send_from_directory
 
 from app.config import load_settings
 from app.gtfs.loader import build_feed_async
@@ -26,6 +29,8 @@ from app.google import legs_for, place_for
 SSE_GRACE_S = 15
 SSE_HEARTBEAT_S = 25
 SSE_IDLE_S = 60
+
+BASE_DIR = Path(__file__).resolve().parent
 
 app = Flask(__name__)
 CORS(app)
@@ -131,7 +136,12 @@ def await_feed():
 
 @app.route("/", methods=["GET"])
 def landing():
-    return "Missed It"
+    return send_from_directory(BASE_DIR, "index.html")
+
+
+@app.route("/styles.css", methods=["GET"])
+def stylesheet():
+    return send_from_directory(BASE_DIR, "styles.css")
 
 
 @app.errorhandler(Exception)
@@ -239,6 +249,10 @@ def stream_trip():
             frm_id, to_id = frm.stop_id, to.stop_id
             frm_name, to_name = frm.stop_name, to.stop_name
             frm_geo, to_geo = geo_of(frm, frm_place), geo_of(to, to_place)
+            snap = {
+                "from": snapped_brief(frm_place) if frm_place else None,
+                "to": snapped_brief(to_place) if to_place else None,
+            }
         else:
             frm_id = to_id = frm_name = to_name = None
             stop_q = request.args.get("stop") or settings.default_stop
@@ -261,13 +275,13 @@ def stream_trip():
                     yield sse("error", result)
 
         def missed_payload():
+            at = build_at(datetime.now(), tz, None)
             if to_id:
-                at = build_at(datetime.now(), tz, None)
                 return {
                     "from": frm_name, "to": to_name,
+                    "snapped": snap,
                     "missed_journeys": clean(journeys_at(feed, frm_id, to_id, 3, at)),
                 }
-            at = build_at(datetime.now(), tz, None)
             return {
                 "stop": stop_q,
                 "missed_trips": clean(missed_trips_at(feed, stop.stop_id, 3, at)),
@@ -292,21 +306,11 @@ def stream_trip():
                 time.sleep(min(SSE_HEARTBEAT_S, max((target_ms - now) / 1000, 0.1)))
             yield sse("missed", missed_payload())
 
-<<<<<<< HEAD
-            #Wait until they've missed it
-            time.sleep(delay/1000)
-
-            #Update them
-            yield wrap({"notification" : "You just missed another departure"})
-
-    return Response(event_stream(), mimetype="text/event-stream")
-=======
     return Response(
         stream_with_context(event_stream()),
         mimetype="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
->>>>>>> 4c3de4f (a-to-b)
 
 
 if __name__ == "__main__":
