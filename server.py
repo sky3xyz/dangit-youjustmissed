@@ -183,6 +183,7 @@ def snapped_brief(place):
     }
 
 
+
 def geo_of(stop, place):
     """coordinates for the Google legs call: geocoded place when we have one,
     otherwise the snapped stop itself"""

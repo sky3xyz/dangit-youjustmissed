@@ -26,6 +26,7 @@ jobs:
           username: deployer
           key: ${{ secrets.VM_SSH_KEY }}
           script: |
+            export PATH=$HOME/.local/bin:$PATH
             cd ~/app
             uv sync
             sudo systemctl restart missed-trips
