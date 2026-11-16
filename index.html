@@ -48,7 +48,7 @@
         const legs = JSON.parse(e.data);
         route_list.innerHTML = "";
         const header = document.createElement("li");
-        header.textContent = "--- next trip legs (google) ---";
+        header.textContent = "--- next trip legs ---";
         route_list.appendChild(header);
         if (legs.length === 0) {
           const li = document.createElement("li");
@@ -58,8 +58,10 @@
         for (const leg of legs) {
           const li = document.createElement("li");
           if (leg.mode === "TRANSIT") {
-            li.textContent = `[${leg.line || "?"}] ${leg.from} -> ${leg.to}` +
-              ` (dep ${fmt(leg.departure_time)} arr ${fmt(leg.arrival_time)})`;
+            li.textContent = `[${leg.line || "?"}] ${leg.from} -> ${leg.to}`;
+            if (leg.headsign && leg.headsign !== leg.to) {
+              li.textContent += ` (${leg.headsign})`;
+            }
           } else {
             li.textContent = `[WALK] ${leg.distance_m || "?"}m — ${leg.instruction || ""}`;
           }
@@ -71,47 +73,60 @@
         const data = JSON.parse(e.data);
         status.textContent = "listening — we'll shout when you miss one";
         status.className = "";
+        renderMissed(data);
+      });
 
-        const board = data.snapped || {};
-        if (board.from) {
-          const li = document.createElement("li");
-          li.className = "snap";
-          li.textContent = `[snap] "${board.from.query}" -> ${board.from.snapped_to.name}` +
-            ` ${board.from.distance_m}m away`;
-          dep_list.appendChild(li);
-        }
-        if (board.to) {
-          const li = document.createElement("li");
-          li.className = "snap";
-          li.textContent = `[snap] "${board.to.query}" -> ${board.to.snapped_to.name}` +
-            ` ${board.to.distance_m}m away`;
-          dep_list.appendChild(li);
-        }
+      // the push: a departure just slipped past the grace window
+      source.addEventListener("just_missed", (e) => {
+        const j = JSON.parse(e.data);
+        status.textContent = `you just missed the [${j.route}] at ${j.departure}!`;
+        status.className = "error";
+        window.alert(`you just missed the [${j.route}] at ${j.departure} — excuse: ${j.excuse}`);
 
-        const journeys = data.missed_journeys || [];
-        if (journeys.length === 0) {
-          const li = document.createElement("li");
-          li.textContent = "you've missed nothing yet (or it's unreachable). congrats?";
-          dep_list.appendChild(li);
-        }
-        for (const j of journeys) {
-          const li = document.createElement("li");
-          li.textContent = `[${j.route}] ${j.departure} -> ${j.arrival}` +
-            ` | missed by ${j.missed_by_minutes}min` +
-            ` | ${j.legs.length} leg${j.legs.length > 1 ? "s" : ""} | ${j.excuse}`;
-          dep_list.appendChild(li);
-        }
-
-        const flashed = (data.missed_journeys || []).find(j => j.missed_by_minutes <= 3);
-        if (flashed) {
-          window.alert(`you just missed the [${flashed.route}] at ${flashed.departure}!`);
-        }
+        // second request: repaint the last-3 board with fresh data
+        fetch("/api/trips?" + new URLSearchParams({
+          from: start_in.value,
+          to: end_in.value
+        }))
+          .then(r => r.json())
+          .then(data => { if (data.missed_journeys) renderMissed(data); })
+          .catch(() => { /* board will catch up on the next missed event */ });
       });
     }
 
-    function fmt(iso) {
-      if (!iso) return "?";
-      return iso.slice(11, 19);
+    function renderMissed(data) {
+      const dep_list = document.getElementById("departures");
+      dep_list.innerHTML = "";
+
+      const board = data.snapped || {};
+      if (board.from) {
+        const li = document.createElement("li");
+        li.className = "snap";
+        li.textContent = `[snap] "${board.from.query}" -> ${board.from.snapped_to.name}` +
+          ` ${board.from.distance_m}m away`;
+        dep_list.appendChild(li);
+      }
+      if (board.to) {
+        const li = document.createElement("li");
+        li.className = "snap";
+        li.textContent = `[snap] "${board.to.query}" -> ${board.to.snapped_to.name}` +
+          ` ${board.to.distance_m}m away`;
+        dep_list.appendChild(li);
+      }
+
+      const journeys = data.missed_journeys || [];
+      if (journeys.length === 0) {
+        const li = document.createElement("li");
+        li.textContent = "you've missed nothing yet (or it's unreachable). congrats?";
+        dep_list.appendChild(li);
+      }
+      for (const j of journeys) {
+        const li = document.createElement("li");
+        li.textContent = `[${j.route}] ${j.departure} -> ${j.arrival}` +
+          ` | missed by ${j.missed_by_minutes}min` +
+          ` | ${j.legs.length} leg${j.legs.length > 1 ? "s" : ""} | ${j.excuse}`;
+        dep_list.appendChild(li);
+      }
     }
 
     function autocomplete(input) {

@@ -4,6 +4,7 @@ the last N scheduled departures at a stop that are in the past.
 pure functions over a GtfsFeed
 """
 
+import math
 from datetime import datetime, timezone
 
 from .gtfs.csv_utils import epoch_ms_for, sec_to_clock, shift_ymd, ymd_to_dash_date
@@ -11,6 +12,7 @@ from .gtfs.service import END_OF_SERVICE_DAY_SECS, services_on
 
 MAX_DAYS_BACK = 7
 GRACE_SECS_TIER = (20, 60, 120)  # message thresholds
+TRANSFER_WALK_M = 250            # re-boarding stops near the drop-off point
 
 
 def excuse_for(minutes: int) -> str:
@@ -115,8 +117,6 @@ def next_departure_at(feed, stop_id: str, at: dict) -> int | None:
     return None
 
 
-# --- A-to-B journeys: trips that actually went from one stop to another -------
-
 JOURNEY_MAX_TOTAL_S = 2 * 3600    # boarding to destination
 JOURNEY_MAX_FIRST_LEG_S = 3600    # cap on the boarding leg before alighting
 JOURNEY_TRANSFER_BUFFER_S = 180   # min transfer time when changing vehicles
@@ -168,10 +168,60 @@ def _direct_arrival(feed, trip_id: str, from_stop: str, to_stop: str,
     return None
 
 
-def _transfer_legs(feed, trip_id: str, from_stop: str, to_stop: str,
+def _direct_arrivals(feed, trip_id: str, from_stop: str, to_stops: set[str],
+                     dep_sec: int):
+    """like _direct_arrival but checks every candidate destination; yields
+    (arr_sec, stop_id) sorted by arrival (first = closest alighting)"""
+    seq = feed.stop_times_by_trip.get(trip_id)
+    if not seq:
+        return
+    seen_from = False
+    hits = []
+    for sec, sid in seq:
+        if not seen_from:
+            if sid == from_stop and sec == dep_sec:
+                seen_from = True
+            continue
+        if sec - dep_sec > JOURNEY_MAX_TOTAL_S:
+            break
+        if sid in to_stops and sec > dep_sec:
+            hits.append((sec, sid))
+    hits.sort()
+    yield from hits
+
+
+def _haversine_m(lat1, lon1, lat2, lon2):
+    r = 6371000
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp, dl = math.radians(lat2 - lat1), math.radians(lon2 - lon1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * r * math.asin(math.sqrt(a))
+
+
+def _near_boardables(feed, x_stop: str) -> list[str]:
+    """stops within TRANSFER_WALK_M of x_stop (bus platform <-> O-Train
+    platform of the same station, the other side of the street, ...);
+    cached per feed"""
+    cache = getattr(feed, "xfer_cache", None)
+    if cache is None:
+        cache = feed.xfer_cache = {}
+    near = cache.get(x_stop)
+    if near is None:
+        ref = feed.stops[x_stop]
+        near = [
+            sid
+            for sid, s in feed.stops.items()
+            if sid in feed.departures_by_stop
+            and _haversine_m(ref.stop_lat, ref.stop_lon, s.stop_lat, s.stop_lon) <= TRANSFER_WALK_M
+        ]
+        cache[x_stop] = near
+    return near
+
+
+def _transfer_legs(feed, trip_id: str, from_stop: str, to_stops: set[str],
                    dep_sec: int, active: frozenset[str], at: dict, ymd: str):
-    """1-transfer journeys: ride trip_id partway, re-board elsewhere.
-    yields (arr_sec, legs)"""
+    """1-transfer journeys: ride trip_id partway, re-board elsewhere (same
+    stop or a short walk away). yields (arr_sec, legs)"""
     seq = feed.stop_times_by_trip.get(trip_id)
     if not seq:
         return
@@ -180,45 +230,75 @@ def _transfer_legs(feed, trip_id: str, from_stop: str, to_stop: str,
         return
     for j in range(i + 1, len(seq)):
         x_sec, x_stop = seq[j]
-        if x_stop == from_stop or x_stop == to_stop:
+        if x_stop == from_stop or x_stop in to_stops:
             continue
         dwell = x_sec - dep_sec
         if dwell > JOURNEY_MAX_FIRST_LEG_S:
             break
-        # candidate re-boards at x_stop
-        for d2, t2 in feed.departures_by_stop.get(x_stop, ()):
-            if d2 < x_sec + JOURNEY_TRANSFER_BUFFER_S:
-                continue
-            if d2 - x_sec > JOURNEY_MAX_TRANSFER_WAIT_S:
-                break
-            if t2 == trip_id:
-                continue
+        # candidate re-boards at x_stop or within walking distance of it
+        cands = []
+        for b_sid in _near_boardables(feed, x_stop):
+            for d2, t2 in feed.departures_by_stop.get(b_sid, ()):
+                if d2 < x_sec + JOURNEY_TRANSFER_BUFFER_S:
+                    continue
+                if d2 - x_sec > JOURNEY_MAX_TRANSFER_WAIT_S:
+                    break
+                if t2 == trip_id:
+                    continue
+                cands.append((d2, t2, b_sid))
+        cands.sort()
+        for d2, t2, b_sid in cands:
             trip2 = feed.trips.get(t2)
             if trip2 is None or trip2.service_id not in active:
                 continue
-            arr2 = _direct_arrival(feed, t2, x_stop, to_stop, d2)
-            if arr2 is None:
-                continue
-            total = arr2 - dep_sec
-            if total > JOURNEY_MAX_TOTAL_S:
-                continue
-            legs = [
-                _leg(feed, trip_id, from_stop, x_stop, dep_sec, x_sec),
-                _leg(feed, t2, x_stop, to_stop, d2, arr2),
-            ]
-            yield arr2, legs
+            for out in _direct_arrivals(feed, t2, b_sid, to_stops, d2):
+                arr2, out_stop = out
+                total = arr2 - dep_sec
+                if total > JOURNEY_MAX_TOTAL_S:
+                    continue
+                legs = [
+                    _leg(feed, trip_id, from_stop, x_stop, dep_sec, x_sec),
+                    _leg(feed, t2, b_sid, out_stop, d2, arr2),
+                ]
+                yield arr2, legs
 
 
-def journeys_at(feed, from_stop: str, to_stop: str, count: int, at: dict,
+def _normalize_stops(feed, stops) -> tuple[list[str], list[str]] | None:
+    """single stop or list -> (departures-merged, valid ids); None when the
+    request can't possibly be answered"""
+    if isinstance(stops, str):
+        stops = [stops]
+    stops = [s for s in stops if s in feed.stops]
+    return None if not stops else stops
+
+
+def _merged_departures(feed, from_stops: list[str]) -> list[tuple[int, str, str]]:
+    """(dep_sec, trip_id, board_stop) at every candidate boarding stop,
+    sorted by time; a trip touching two candidates appears once with the
+    later of the two boardings (you board at the nearest chance)"""
+    best = {}
+    for sid in from_stops:
+        for dep_sec, trip_id in feed.departures_by_stop.get(sid, ()):
+            best.setdefault((dep_sec, trip_id), sid)
+    return sorted(((d, t, s) for (d, t), s in best.items()), key=lambda x: (x[0], x[1]))
+
+
+def journeys_at(feed, from_stops, to_stops, count: int, at: dict,
                 max_transfers: int = 1) -> list[dict] | None:
     """
-    the last `count` A-to-B trips that already happened: departures at
-    from_stop whose vehicle actually reached to_stop (same trip, or one
-    transfer). zero leg of this is reconstructed - every stop/time is the
-    schedule that existed.
+    the last `count` A-to-B trips that already happened: departures at any of
+    the candidate boarding stops (nearby platforms count - you can't always
+    tell which side of the street) whose vehicle reached any of the candidate
+    alighting stops (bus platform or train station, whichever is closer).
+    direct or one transfer. every stop/time is the schedule that existed.
     """
-    departures = feed.departures_by_stop.get(from_stop)
-    if not departures or to_stop not in feed.stops:
+    from_stops = _normalize_stops(feed, from_stops)
+    to_stops = _normalize_stops(feed, to_stops)
+    if from_stops is None or to_stops is None:
+        return None
+    to_set = set(to_stops)
+    departures = _merged_departures(feed, from_stops)
+    if not departures:
         return None
 
     journeys: list[dict] = []
@@ -226,7 +306,7 @@ def journeys_at(feed, from_stop: str, to_stop: str, count: int, at: dict,
     for _day_back in range(MAX_DAYS_BACK + 1):
         active = services_on(feed, ymd)
         cutoff = at["secs"] if ymd == at["ymd"] else END_OF_SERVICE_DAY_SECS
-        for dep_sec, trip_id in reversed(departures):
+        for dep_sec, trip_id, board_stop in reversed(departures):
             if len(journeys) >= count:
                 return journeys
             if dep_sec > cutoff:
@@ -235,14 +315,15 @@ def journeys_at(feed, from_stop: str, to_stop: str, count: int, at: dict,
             if trip is None or trip.service_id not in active:
                 continue
             dep_epoch_ms = _epoch_ms_of(ymd, dep_sec, at["tz"])
-            arr_sec = _direct_arrival(feed, trip_id, from_stop, to_stop, dep_sec)
             found = []
-            if arr_sec is not None:
-                found.append((arr_sec, [_leg(feed, trip_id, from_stop, to_stop,
+            direct = next(_direct_arrivals(feed, trip_id, board_stop, to_set, dep_sec), None)
+            if direct is not None:
+                arr_sec, out_stop = direct
+                found.append((arr_sec, [_leg(feed, trip_id, board_stop, out_stop,
                                              dep_sec, arr_sec)]))
             if max_transfers >= 1:
-                found.extend(_transfer_legs(feed, trip_id, from_stop, to_stop,
-                                            dep_sec, active, at, ymd))
+                found.extend(_transfer_legs(feed, trip_id, board_stop,
+                                            to_set, dep_sec, active, at, ymd))
             for arr_sec, legs in found:
                 journeys.append({
                     "from": legs[0]["from"],
@@ -263,35 +344,40 @@ def journeys_at(feed, from_stop: str, to_stop: str, count: int, at: dict,
     return journeys  # empty list = nothing reachable in the feed
 
 
-def next_journey_at(feed, from_stop: str, to_stop: str, at: dict,
+def next_journey_at(feed, from_stops, to_stops, at: dict,
                     max_transfers: int = 1) -> dict | None:
     """the next upcoming A-to-B trip: {"departure_epoch_ms", "arrival_epoch_ms"}
     for the stream wakeup trigger, same walk mirrored forward"""
-    departures = feed.departures_by_stop.get(from_stop)
-    if not departures or to_stop not in feed.stops:
+    from_stops = _normalize_stops(feed, from_stops)
+    to_stops = _normalize_stops(feed, to_stops)
+    if from_stops is None or to_stops is None:
+        return None
+    to_set = set(to_stops)
+    departures = _merged_departures(feed, from_stops)
+    if not departures:
         return None
 
     ymd = at["ymd"]
     for _day_forward in range(MAX_DAYS_BACK + 1):
         active = services_on(feed, ymd)
         floor = at["secs"] if ymd == at["ymd"] else -1
-        for dep_sec, trip_id in departures:
+        for dep_sec, trip_id, board_stop in departures:
             if dep_sec <= floor:
                 continue
             trip = feed.trips.get(trip_id)
             if trip is None or trip.service_id not in active:
                 continue
-            dep_epoch_ms = _epoch_ms_of(ymd, dep_sec, at["tz"])
-            arr_sec = _direct_arrival(feed, trip_id, from_stop, to_stop, dep_sec)
+            arr_sec = next(_direct_arrivals(feed, trip_id, board_stop, to_set, dep_sec), None)
             if arr_sec is None:
-                for arr2, _legs in _transfer_legs(feed, trip_id, from_stop, to_stop,
-                                                  dep_sec, active, at, ymd):
+                for arr2, _legs in _transfer_legs(feed, trip_id, board_stop,
+                                                  to_set, dep_sec, active, at, ymd):
                     arr_sec = arr2
                     break
             if arr_sec is None:
                 continue
             arr_epoch_ms = _epoch_ms_of(ymd, arr_sec, at["tz"])
             if arr_epoch_ms > at["epoch_ms"]:
+                dep_epoch_ms = _epoch_ms_of(ymd, dep_sec, at["tz"])
                 return {"departure_epoch_ms": dep_epoch_ms, "arrival_epoch_ms": arr_epoch_ms}
         ymd = shift_ymd(ymd, 1)
     return None

@@ -1,12 +1,3 @@
-# /// script
-# requires-python = ">=3.12"
-# dependencies = [
-#     "flask>=3.1",
-#     "flask-cors>=6.0.5",
-#     "python-dotenv>=1.2",
-#     "requests>=2.32",
-# ]
-# ///
 from flask import Flask, Response, request, jsonify, stream_with_context
 from flask_cors import CORS
 
@@ -48,10 +39,10 @@ def find_stop(feed, q):
     for stop in feed.stops.values():
         if stop.stop_code and stop.stop_code.lower() == lowered:
             return stop
-    for stop in feed.stops.values():
-        if lowered in stop.stop_name.lower():
-            return stop
-    return None
+    matches = [s for s in feed.stops.values() if lowered in s.stop_name.lower()]
+    if not matches:
+        return None
+    return min(matches, key=lambda s: len(s.stop_name))
 
 
 def clean(trips):
@@ -74,45 +65,55 @@ def _haversine_m(lat1, lon1, lat2, lon2):
     return 2 * r * math.asin(math.sqrt(a))
 
 
-def nearest_stop(feed, lat, lon, boardable):
+CANDIDATE_RADIUS_M = 450
+CANDIDATE_COUNT = 4
+
+
+def candidates(feed, lat, lon, boardable):
     """
-    closest stop to a coordinate; when boardable, require it to have
-    departures (a snap target you can't board at is useless)
+    the nearest few stops to a coordinate (nearby platforms count - which side
+    of the street, or the train platform instead of the bus one, is decided by
+    the schedule, not the pin)
     """
-    best, best_d = None, None
+    scored = []
     for stop in feed.stops.values():
         if boardable and stop.stop_id not in feed.departures_by_stop:
             continue
         d = _haversine_m(lat, lon, stop.stop_lat, stop.stop_lon)
-        if best_d is None or d < best_d:
-            best, best_d = stop, d
-    return best, best_d
+        if d <= CANDIDATE_RADIUS_M:
+            scored.append((d, stop))
+    scored.sort(key=lambda t: t[0])
+    return [stop for _, stop in scored[:CANDIDATE_COUNT]]
 
 
 def resolve_place(feed, text, boardable):
     """
-    text -> (stop, place) where place is None for direct stop-name matches
-    or {query, place, address, lat, lon, snapped_to, distance_m} for geocodes
+    text -> (candidate stops, place) where place is None for direct stop-name
+    matches or {query, place, address, lat, lon, snapped_to, distance_m} for
+    geocodes; candidate stops is [] when nothing resolved. a substring match
+    expands to nearby platforms (the text "carleton" shouldn't pin you to the
+    bus platform when the train station is 200m away).
     """
     stop = find_stop(feed, text)
     if stop is not None:
-        return stop, None
+        return candidates(feed, stop.stop_lat, stop.stop_lon, boardable), None
     if not settings.google_api_key:
-        return None, None
+        return [], None
     geo = place_for(settings.google_api_key, settings.google_referer, text)
     if "error" in geo or geo.get("lat") is None:
-        return None, None
-    stop, dist = nearest_stop(feed, geo["lat"], geo["lon"], boardable)
-    if stop is None:
-        return None, None
-    return stop, {
+        return [], None
+    stops = candidates(feed, geo["lat"], geo["lon"], boardable)
+    if not stops:
+        return [], None
+    nearest_d = _haversine_m(geo["lat"], geo["lon"], stops[0].stop_lat, stops[0].stop_lon)
+    return stops, {
         "query": text,
         "place": geo.get("name"),
         "address": geo.get("address"),
         "lat": geo["lat"],
         "lon": geo["lon"],
-        "snapped_to": stop_brief(stop),
-        "distance_m": round(dist),
+        "snapped_to": stop_brief(stops[0]),
+        "distance_m": round(nearest_d),
     }
 
 
@@ -183,10 +184,10 @@ def snapped_brief(place):
     }
 
 
-
 def geo_of(stop, place):
-    """coordinates for the Google legs call: geocoded place when we have one,
-    otherwise the snapped stop itself"""
+    """
+    coordinates for the Google legs call: geocoded place when we have one, otherwise the snapped stop itself
+    """
     if place and place.get("lat") is not None:
         return f"{place['lat']},{place['lon']}"
     return f"{stop.stop_lat},{stop.stop_lon}"
@@ -200,22 +201,26 @@ def trips_json():
     to_q = request.args.get("to")
     at = build_at(datetime.now(), tz, request.args.get("at"))
     if to_q:
-        frm, frm_place = resolve_place(feed, request.args.get("from") or settings.default_stop, boardable=True)
-        to, to_place = resolve_place(feed, to_q, boardable=False)
-        if frm is None or to is None:
-            missing = request.args.get("from") if frm is None else to_q
-            return jsonify({"error": "cannot resolve stop", "unresolved": missing,
+        frm_stops, frm_place = resolve_place(feed, request.args.get("from") or settings.default_stop, boardable=True)
+        to_stops, to_place = resolve_place(feed, to_q, boardable=False)
+        if not frm_stops or not to_stops:
+            unresolved = request.args.get("from") if not frm_stops else to_q
+            return jsonify({"error": "cannot resolve stop", "unresolved": unresolved,
                             "hint": "use a stop code/id/name, /stops?q=, or an address"}), 404
-        nxt = next_journey_at(feed, frm.stop_id, to.stop_id, at)
+        frm_ids = [s.stop_id for s in frm_stops]
+        to_ids = [s.stop_id for s in to_stops]
+        nxt = next_journey_at(feed, frm_ids, to_ids, at)
         return jsonify({
-            "from": stop_brief(frm),
-            "to": stop_brief(to),
+            "from": stop_brief(frm_stops[0]),
+            "to": stop_brief(to_stops[0]),
+            "from_stops": [stop_brief(s) for s in frm_stops],
+            "to_stops": [stop_brief(s) for s in to_stops],
             "from_snapped": snapped_brief(frm_place) if frm_place else None,
             "to_snapped": snapped_brief(to_place) if to_place else None,
             "as_of": iso(now_ms()),
             "looked_back_until": f"{at['ymd']} {at['secs'] // 3600:02d}:{at['secs'] % 3600 // 60:02d}:00",
             "next_journey_at": iso(nxt["departure_epoch_ms"]) if nxt else None,
-            "missed_journeys": clean(journeys_at(feed, frm.stop_id, to.stop_id, 3, at)),
+            "missed_journeys": clean(journeys_at(feed, frm_ids, to_ids, 3, at)),
         })
     stop = find_stop(feed, request.args.get("stop") or settings.default_stop)
     if stop is None:
@@ -241,21 +246,22 @@ def stream_trip():
             yield sse("error", {"error": "feed unavailable"})
             return
         if to_q:
-            frm, frm_place = resolve_place(feed, request.args.get("from") or settings.default_stop, boardable=True)
-            to, to_place = resolve_place(feed, to_q, boardable=False)
-            if frm is None or to is None:
-                unresolved = request.args.get("from") if frm is None else to_q
+            frm_stops, frm_place = resolve_place(feed, request.args.get("from") or settings.default_stop, boardable=True)
+            to_stops, to_place = resolve_place(feed, to_q, boardable=False)
+            if not frm_stops or not to_stops:
+                unresolved = request.args.get("from") if not frm_stops else to_q
                 yield sse("error", {"error": "cannot resolve stop", "unresolved": unresolved})
                 return
-            frm_id, to_id = frm.stop_id, to.stop_id
-            frm_name, to_name = frm.stop_name, to.stop_name
-            frm_geo, to_geo = geo_of(frm, frm_place), geo_of(to, to_place)
+            frm_ids = [s.stop_id for s in frm_stops]
+            to_ids = [s.stop_id for s in to_stops]
+            frm_name, to_name = frm_stops[0].stop_name, to_stops[0].stop_name
+            frm_geo, to_geo = geo_of(frm_stops[0], frm_place), geo_of(to_stops[0], to_place)
             snap = {
                 "from": snapped_brief(frm_place) if frm_place else None,
                 "to": snapped_brief(to_place) if to_place else None,
             }
         else:
-            frm_id = to_id = frm_name = to_name = None
+            frm_ids = to_ids = frm_name = to_name = None
             stop_q = request.args.get("stop") or settings.default_stop
             stop = find_stop(feed, stop_q)
             if stop is None:
@@ -271,17 +277,20 @@ def stream_trip():
                 result = legs_for(settings.google_api_key, settings.google_referer,
                                   g_start, g_end, now_ms())
                 if "legs" in result:
-                    yield sse("legs", result["legs"])
+                    legs = [{k: v for k, v in leg.items()
+                             if k not in ("departure_time", "arrival_time")}
+                            for leg in result["legs"]]
+                    yield sse("legs", legs)
                 else:
                     yield sse("error", result)
 
         def missed_payload():
             at = build_at(datetime.now(), tz, None)
-            if to_id:
+            if to_ids:
                 return {
                     "from": frm_name, "to": to_name,
                     "snapped": snap,
-                    "missed_journeys": clean(journeys_at(feed, frm_id, to_id, 3, at)),
+                    "missed_journeys": clean(journeys_at(feed, frm_ids, to_ids, 3, at)),
                 }
             return {
                 "stop": stop_q,
@@ -292,8 +301,8 @@ def stream_trip():
 
         while True:
             at = build_at(datetime.now(), tz, None)
-            if to_id:
-                nxt = next_journey_at(feed, frm_id, to_id, at)
+            if to_ids:
+                nxt = next_journey_at(feed, frm_ids, to_ids, at)
                 next_ms = nxt["departure_epoch_ms"] if nxt else None
             else:
                 next_ms = next_departure_at(feed, stop.stop_id, at)
@@ -305,7 +314,17 @@ def stream_trip():
                 now = now_ms()
                 yield f": ping {now}\n\n"
                 time.sleep(min(SSE_HEARTBEAT_S, max((target_ms - now) / 1000, 0.1)))
-            yield sse("missed", missed_payload())
+            payload = missed_payload()
+            yield sse("missed", payload)
+            journeys = payload.get("missed_journeys") or []
+            if journeys:
+                # the "you just missed it" push: the newest missed journey must
+                # be the departure we just slept past, not an old one
+                dep_ms = int(datetime.fromisoformat(
+                    journeys[0]["actually_departed_at"].replace("Z", "+00:00")
+                ).timestamp() * 1000)
+                if dep_ms > next_ms - 60_000:
+                    yield sse("just_missed", journeys[0])
 
     return Response(
         stream_with_context(event_stream()),
