@@ -108,4 +108,4 @@ During the Hackathon, we had setup a GitHub Actions workflow that rsyncs to a GC
 ## LLM Disclosure
 
 Since this was a one day hackathon, we used Large Language Models (LLMs) to draft portions of this codebase, all code was tested and reviewed by us.
-Specifically, we used the GLM 5.3 and Gemini *insert here* models.
+Specifically, we used the GLM 5.3 and Gemini 3.5 flash models.
